@@ -35,12 +35,15 @@ if "response" not in st.session_state:
     st.session_state.response = ""
 if "status" not in st.session_state:
     st.session_state.status = ""
+if "run_search" not in st.session_state:
+    st.session_state.run_search = False
 
 def clear_search():
     st.session_state.question = ""
     st.session_state.cf_vms = ""
     st.session_state.response = ""
     st.session_state.status = ""
+    st.session_state.run_search = False
 
 def get_embedding(text):
     response = client.embeddings.create(
@@ -67,14 +70,13 @@ def ask_question(question, cf_vms_filter=None):
     if not matches:
         return "No relevant tickets found. Please try refining your question or filter."
 
-    # Compose summary from matched tickets
     combined_text = ""
     ticket_ids = []
     for match in matches:
         md = match.metadata or {}
         combined_text += md.get("Comments", "") + "\n\n"
         ticket_id = md.get("IssueKey") or md.get("id")
-        if ticket_id:
+        if ticket_id and ticket_id not in ticket_ids:
             ticket_ids.append(ticket_id)
 
     prompt = (
@@ -114,21 +116,22 @@ def main():
                 st.session_state.question = question_input
                 st.session_state.cf_vms = cf_vms_input
                 st.session_state.status = "Searching knowledge base, please wait..."
+                st.session_state.run_search = True
                 st.experimental_rerun()
 
         if clear_clicked:
             clear_search()
-            # No rerun here, just clear inputs & outputs
+            # no rerun here, just clear UI
 
-    if st.session_state.status == "Searching knowledge base, please wait...":
-        # Perform search and update session state
+    # Controlled rerun steps for search
+    if st.session_state.run_search:
+        # Perform the query only once per run_search True
         st.session_state.response = ask_question(st.session_state.question, st.session_state.cf_vms)
         st.session_state.status = "Search complete."
-
-        # After updating results, rerun to refresh UI
+        st.session_state.run_search = False
         st.experimental_rerun()
 
-    # Show status and results if available
+    # Show status and results
     if st.session_state.status:
         st.write(st.session_state.status)
 
