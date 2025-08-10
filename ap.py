@@ -5,28 +5,24 @@ from pinecone import Pinecone, ServerlessSpec
 # Load keys from Streamlit secrets
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
-PINECONE_ENV = st.secrets.get("PINECONE_ENV")  # optional, like 'us-west1-gcp'
+PINECONE_ENV = st.secrets.get("PINECONE_ENV")  # optional
 PINECONE_INDEX_NAME = st.secrets["PINECONE_INDEX_NAME"]
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Initialize Pinecone client with environment spec if available
+# Initialize Pinecone client
 if PINECONE_ENV:
     pc = Pinecone(
         api_key=PINECONE_API_KEY,
-        spec=ServerlessSpec(
-            cloud="aws",   # or "gcp" depending on your setup
-            region=PINECONE_ENV
-        )
+        spec=ServerlessSpec(cloud="aws", region=PINECONE_ENV),
     )
 else:
     pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# Connect to Pinecone index
 index = pc.Index(PINECONE_INDEX_NAME)
 
-# Initialize session state variables on first run
+# Initialize session state on first run
 if "question" not in st.session_state:
     st.session_state.question = ""
 if "cf_vms" not in st.session_state:
@@ -35,21 +31,15 @@ if "response" not in st.session_state:
     st.session_state.response = ""
 if "status" not in st.session_state:
     st.session_state.status = ""
-if "run_search" not in st.session_state:
-    st.session_state.run_search = False
 
-def clear_search():
+def clear_all():
     st.session_state.question = ""
     st.session_state.cf_vms = ""
     st.session_state.response = ""
     st.session_state.status = ""
-    st.session_state.run_search = False
 
 def get_embedding(text):
-    response = client.embeddings.create(
-        input=text,
-        model="text-embedding-3-small"
-    )
+    response = client.embeddings.create(input=text, model="text-embedding-3-small")
     return response.data[0].embedding
 
 def ask_question(question, cf_vms_filter=None):
@@ -99,44 +89,36 @@ def ask_question(question, cf_vms_filter=None):
 
     return f"=== Helpdesk KB Response ===\n\n{summary}\n\n{tickets_line}\n\n============================"
 
-def main():
-    st.title("Helpdesk KB Chatbot")
+st.title("Helpdesk KB Chatbot")
 
-    with st.form("search_form", clear_on_submit=False):
-        question_input = st.text_input("Enter your question (or leave blank to exit):", value=st.session_state.question)
-        cf_vms_input = st.text_input("Filter by tool (CF_VMS) or leave blank for all:", value=st.session_state.cf_vms)
+with st.form("search_form"):
+    question_input = st.text_input("Enter your question (or leave blank to exit):", value=st.session_state.question, key="question_input")
+    cf_vms_input = st.text_input("Filter by tool (CF_VMS) or leave blank for all:", value=st.session_state.cf_vms, key="cf_vms_input")
+    search_clicked = st.form_submit_button("Search")
+    clear_clicked = st.form_submit_button("Clear")
 
-        search_clicked = st.form_submit_button("Search")
-        clear_clicked = st.form_submit_button("Clear")
+    if search_clicked:
+        if not question_input.strip():
+            st.warning("Please enter a question to search.")
+        else:
+            st.session_state.question = question_input
+            st.session_state.cf_vms = cf_vms_input
+            st.session_state.status = "Searching knowledge base, please wait..."
+            st.session_state.response = ""  # clear old response
+            st.experimental_rerun()  # Rerun after setting session state
 
-        if search_clicked:
-            if question_input.strip() == "":
-                st.warning("Please enter a question to search.")
-            else:
-                st.session_state.question = question_input
-                st.session_state.cf_vms = cf_vms_input
-                st.session_state.status = "Searching knowledge base, please wait..."
-                st.session_state.run_search = True
-                st.experimental_rerun()
-
-        if clear_clicked:
-            clear_search()
-            # no rerun here, just clear UI
-
-    # Controlled rerun steps for search
-    if st.session_state.run_search:
-        # Perform the query only once per run_search True
-        st.session_state.response = ask_question(st.session_state.question, st.session_state.cf_vms)
-        st.session_state.status = "Search complete."
-        st.session_state.run_search = False
+    if clear_clicked:
+        clear_all()
         st.experimental_rerun()
 
-    # Show status and results
-    if st.session_state.status:
-        st.write(st.session_state.status)
+# After rerun, if status is searching, perform query here once
+if st.session_state.status == "Searching knowledge base, please wait...":
+    st.session_state.response = ask_question(st.session_state.question, st.session_state.cf_vms)
+    st.session_state.status = "Search complete."
 
-    if st.session_state.response:
-        st.text_area("Response:", value=st.session_state.response, height=350)
+# Display status and response
+if st.session_state.status:
+    st.info(st.session_state.status)
 
-if __name__ == "__main__":
-    main()
+if st.session_state.response:
+    st.text_area("Response:", value=st.session_state.response, height=350)
