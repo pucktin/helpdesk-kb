@@ -8,15 +8,14 @@ PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
 PINECONE_ENV = st.secrets.get("PINECONE_ENV")  # optional, like 'us-west1-gcp'
 PINECONE_INDEX_NAME = st.secrets["PINECONE_INDEX_NAME"]
 
-# Initialize OpenAI client
+# Initialize clients
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Initialize Pinecone client with environment spec if available
 if PINECONE_ENV:
     pc = Pinecone(
         api_key=PINECONE_API_KEY,
         spec=ServerlessSpec(
-            cloud="aws",   # or "gcp"
+            cloud="aws",
             region=PINECONE_ENV
         )
     )
@@ -27,7 +26,7 @@ index = pc.Index(PINECONE_INDEX_NAME)
 
 st.title("Helpdesk KB Chatbot")
 
-# Initialize session state variables
+# Initialize session state vars
 if "question" not in st.session_state:
     st.session_state.question = ""
 if "cf_vms" not in st.session_state:
@@ -45,18 +44,12 @@ def get_embedding(text: str):
     return response.data[0].embedding
 
 def ask_question(question: str, cf_vms_filter: str = None):
-    """Perform Pinecone query and use OpenAI to summarize results."""
-
     query_embedding = get_embedding(question)
 
-    # Build Pinecone filter for CF_VMS if provided
     filter_dict = None
-    if cf_vms_filter and cf_vms_filter.strip() != "":
-        filter_dict = {
-            "CF_VMS": {"$eq": cf_vms_filter.strip()}
-        }
+    if cf_vms_filter and cf_vms_filter.strip():
+        filter_dict = {"CF_VMS": {"$eq": cf_vms_filter.strip()}}
 
-    # Query Pinecone for top 10 results (increase if you want)
     query_response = index.query(
         vector=query_embedding,
         top_k=10,
@@ -68,16 +61,13 @@ def ask_question(question: str, cf_vms_filter: str = None):
     if not matches:
         return "No relevant tickets found in knowledge base."
 
-    # Extract text from matched tickets to feed to GPT for summarization
     combined_text = ""
     ticket_ids = []
     for match in matches:
         metadata = match.metadata or {}
         ticket_ids.append(metadata.get("IssueKey") or metadata.get("id") or "UnknownID")
-        # Combine fields (title, description, comments etc.) as needed:
         combined_text += metadata.get("Comments", "") + "\n"
 
-    # Prepare prompt for GPT summary
     prompt = (
         "You are a helpdesk knowledge base assistant. "
         "Given the following comments from past tickets, provide a concise summary answer "
@@ -87,7 +77,6 @@ def ask_question(question: str, cf_vms_filter: str = None):
         "Summary answer:"
     )
 
-    # Call OpenAI chat/completion API to get summary
     chat_response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -99,7 +88,6 @@ def ask_question(question: str, cf_vms_filter: str = None):
     )
     summary = chat_response.choices[0].message.content.strip()
 
-    # Append referenced ticket IDs at the end
     tickets_str = ", ".join(ticket_ids)
     summary += f"\n\nReferenced Ticket IDs:\n{tickets_str}\n\n============================"
 
@@ -111,30 +99,33 @@ def clear_search():
     st.session_state.status = ""
     st.session_state.response = ""
 
-def do_search():
-    st.session_state.status = "Searching knowledge base, please wait..."
-    st.experimental_rerun()  # Update UI immediately to show status
-
 def main():
-    question_input = st.text_input("Enter your question (or leave blank to exit):", value=st.session_state.question)
-    cf_vms_input = st.text_input("Filter by tool (CF_VMS) or leave blank for all:", value=st.session_state.cf_vms)
+    with st.form("search_form", clear_on_submit=False):
+        question_input = st.text_input("Enter your question (or leave blank to exit):", value=st.session_state.question)
+        cf_vms_input = st.text_input("Filter by tool (CF_VMS) or leave blank for all:", value=st.session_state.cf_vms)
+        
+        submit = st.form_submit_button("Search")
+        clear = st.form_submit_button("Clear / Search Again")
 
-    col1, col2 = st.columns([1,1])
-    with col1:
-        if st.button("Search"):
+        if submit:
             if question_input.strip() == "":
                 st.warning("Please enter a question to search.")
             else:
                 st.session_state.question = question_input
                 st.session_state.cf_vms = cf_vms_input
                 st.session_state.status = "Searching knowledge base, please wait..."
-                st.session_state.response = ask_question(question_input, cf_vms_input)
-                st.session_state.status = "Search complete."
-                st.experimental_rerun()  # Refresh to update status and show results
-    with col2:
-        if st.button("Clear / Search Again"):
+                st.experimental_rerun()  # rerun to show status update before running query
+
+        if clear:
             clear_search()
             st.experimental_rerun()
+
+    # Run search if status is searching
+    if st.session_state.status == "Searching knowledge base, please wait...":
+        # Run query outside form to avoid rerun loop
+        st.session_state.response = ask_question(st.session_state.question, st.session_state.cf_vms)
+        st.session_state.status = "Search complete."
+        st.experimental_rerun()
 
     if st.session_state.status:
         st.write(st.session_state.status)
