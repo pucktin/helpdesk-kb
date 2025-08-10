@@ -5,28 +5,37 @@ from pinecone import Pinecone, ServerlessSpec
 # Load keys from Streamlit secrets
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
-PINECONE_ENV = st.secrets.get("PINECONE_ENV")  # optional, e.g. 'us-west1-gcp'
+PINECONE_ENV = st.secrets.get("PINECONE_ENV")  # optional, like 'us-west1-gcp'
 PINECONE_INDEX_NAME = st.secrets["PINECONE_INDEX_NAME"]
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Initialize Pinecone client with environment spec if provided
+# Initialize Pinecone client with environment spec if available
 if PINECONE_ENV:
     pc = Pinecone(
         api_key=PINECONE_API_KEY,
         spec=ServerlessSpec(
-            cloud="aws",  # or "gcp" if your env is on GCP
+            cloud="aws",   # or "gcp"
             region=PINECONE_ENV
         )
     )
 else:
     pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# Connect to Pinecone index
 index = pc.Index(PINECONE_INDEX_NAME)
 
 st.title("Helpdesk KB Chatbot")
+
+# Initialize session state variables
+if "question" not in st.session_state:
+    st.session_state.question = ""
+if "cf_vms" not in st.session_state:
+    st.session_state.cf_vms = ""
+if "status" not in st.session_state:
+    st.session_state.status = ""
+if "response" not in st.session_state:
+    st.session_state.response = ""
 
 def get_embedding(text: str):
     response = client.embeddings.create(
@@ -35,78 +44,103 @@ def get_embedding(text: str):
     )
     return response.data[0].embedding
 
-def search_pinecone(query_embedding, cf_vms_filter=None, top_k=5):
-    # Build metadata filter if CF_VMS filter is given
-    metadata_filter = None
-    if cf_vms_filter and cf_vms_filter.strip():
-        metadata_filter = {
+def ask_question(question: str, cf_vms_filter: str = None):
+    """Perform Pinecone query and use OpenAI to summarize results."""
+
+    query_embedding = get_embedding(question)
+
+    # Build Pinecone filter for CF_VMS if provided
+    filter_dict = None
+    if cf_vms_filter and cf_vms_filter.strip() != "":
+        filter_dict = {
             "CF_VMS": {"$eq": cf_vms_filter.strip()}
         }
 
+    # Query Pinecone for top 10 results (increase if you want)
     query_response = index.query(
         vector=query_embedding,
-        top_k=top_k,
-        include_metadata=True,
-        filter=metadata_filter
+        top_k=10,
+        filter=filter_dict,
+        include_metadata=True
     )
-    return query_response.matches
 
-def generate_summary(question, tickets_text):
-    prompt = f"""You are a helpful assistant.
+    matches = query_response.matches
+    if not matches:
+        return "No relevant tickets found in knowledge base."
 
-User question: {question}
+    # Extract text from matched tickets to feed to GPT for summarization
+    combined_text = ""
+    ticket_ids = []
+    for match in matches:
+        metadata = match.metadata or {}
+        ticket_ids.append(metadata.get("IssueKey") or metadata.get("id") or "UnknownID")
+        # Combine fields (title, description, comments etc.) as needed:
+        combined_text += metadata.get("Comments", "") + "\n"
 
-Here are relevant past tickets for context:
-{tickets_text}
+    # Prepare prompt for GPT summary
+    prompt = (
+        "You are a helpdesk knowledge base assistant. "
+        "Given the following comments from past tickets, provide a concise summary answer "
+        "to the user's question. Then list the ticket IDs referenced.\n\n"
+        f"User question: {question}\n\n"
+        f"Ticket comments:\n{combined_text}\n\n"
+        "Summary answer:"
+    )
 
-Please provide a concise summary answer to the user's question based on the tickets above."""
-    
-    response = client.chat.completions.create(
+    # Call OpenAI chat/completion API to get summary
+    chat_response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "You are a helpful and concise helpdesk assistant."},
+            {"role": "user", "content": prompt}
         ],
         max_tokens=500,
         temperature=0.3,
     )
-    return response.choices[0].message.content
+    summary = chat_response.choices[0].message.content.strip()
+
+    # Append referenced ticket IDs at the end
+    tickets_str = ", ".join(ticket_ids)
+    summary += f"\n\nReferenced Ticket IDs:\n{tickets_str}\n\n============================"
+
+    return summary
+
+def clear_search():
+    st.session_state.question = ""
+    st.session_state.cf_vms = ""
+    st.session_state.status = ""
+    st.session_state.response = ""
+
+def do_search():
+    st.session_state.status = "Searching knowledge base, please wait..."
+    st.experimental_rerun()  # Update UI immediately to show status
 
 def main():
-    question = st.text_input("Enter your question (or leave blank to exit):")
-    cf_vms = st.text_input("Filter by tool (CF_VMS) or leave blank for all:")
+    question_input = st.text_input("Enter your question (or leave blank to exit):", value=st.session_state.question)
+    cf_vms_input = st.text_input("Filter by tool (CF_VMS) or leave blank for all:", value=st.session_state.cf_vms)
 
-    if question:
-        st.info("Searching knowledge base, please wait...")
-        query_embedding = get_embedding(question)
+    col1, col2 = st.columns([1,1])
+    with col1:
+        if st.button("Search"):
+            if question_input.strip() == "":
+                st.warning("Please enter a question to search.")
+            else:
+                st.session_state.question = question_input
+                st.session_state.cf_vms = cf_vms_input
+                st.session_state.status = "Searching knowledge base, please wait..."
+                st.session_state.response = ask_question(question_input, cf_vms_input)
+                st.session_state.status = "Search complete."
+                st.experimental_rerun()  # Refresh to update status and show results
+    with col2:
+        if st.button("Clear / Search Again"):
+            clear_search()
+            st.experimental_rerun()
 
-        matches = search_pinecone(query_embedding, cf_vms_filter=cf_vms, top_k=10)
+    if st.session_state.status:
+        st.write(st.session_state.status)
 
-        if not matches:
-            st.warning("No matching tickets found.")
-            return
-
-        # Concatenate the relevant ticket text fields for GPT context
-        tickets_text = ""
-        ticket_ids = []
-        for match in matches:
-            meta = match.metadata or {}
-            ticket_id = meta.get("IssueKey") or meta.get("id") or "Unknown ID"
-            ticket_ids.append(ticket_id)
-
-            # Construct a text snippet per ticket
-            snippet = f"Ticket ID: {ticket_id}\nTitle: {meta.get('Title', '')}\nDescription: {meta.get('Description', '')}\nComments: {meta.get('Comments', '')}\n\n"
-            tickets_text += snippet
-
-        # Generate GPT summary answer
-        answer = generate_summary(question, tickets_text)
-
-        # Display answer and referenced tickets
-        st.markdown("=== **Helpdesk KB Response** ===")
-        st.write(answer.strip())
-        st.markdown("**Referenced Ticket IDs:**")
-        st.write(", ".join(ticket_ids))
-        st.markdown("============================")
+    if st.session_state.response:
+        st.text_area("Response:", value=st.session_state.response, height=350)
 
 if __name__ == "__main__":
     main()
